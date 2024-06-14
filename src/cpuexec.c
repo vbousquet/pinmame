@@ -181,7 +181,8 @@ static int cycles_stolen;
  *
  *************************************/
 
-#define LOW_LATENCY_THROTTLE_PARTS 4
+//#define LOW_LATENCY_THROTTLE_PARTS 4
+#define LOW_LATENCY_THROTTLE_PARTS 30
 
 static void *sync_timer;
 static int sync_countdown;

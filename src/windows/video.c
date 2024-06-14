@@ -740,7 +740,7 @@ void throttle_speed_part(int part, int totalparts)
 	cycles_t target, curr, cps;
 
 	// if we're only syncing to the refresh, bail now
-	if (win_sync_refresh)
+	if (win_sync_refresh || 1)
 		return;
 
 	// this counts as idle time
