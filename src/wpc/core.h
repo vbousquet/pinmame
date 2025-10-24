@@ -426,6 +426,8 @@ typedef int (*ptPinMAMEvidUpdate)(struct mame_bitmap *bitmap, const struct recta
 #define CORE_MODOUT_BULB_89_20V_DC_GTS3  302 /* Incandescent #89 Bulb connected to 20V, commonly used for flashers */
 #define CORE_MODOUT_BULB_89_32V_DC_S11   303 /* Incandescent #89 Bulb connected to 32V, used for flashers on S11 with output strobing */
 #define CORE_MODOUT_BULB_89_25V_DC_S11   304 /* Incandescent #89 Bulb connected to 25V, used for flashers on S11 with output strobing */
+#define CORE_MODOUT_BULB_89_48V_AC_POS_BY 305/* Incandescent #89 Bulb connected to AC 48V with a diode for positive half (Bally 6803) */
+#define CORE_MODOUT_BULB_89_48V_AC_NEG_BY 306/* Incandescent #89 Bulb connected to AC 48V with a diode for negative half (Bally 6803) */
 #define CORE_MODOUT_BULB_906_20V_DC_WPC  311 /* Incandescent #906 Bulb connected to 20V, commonly used for flashers */
 #define CORE_MODOUT_BULB_906_20V_DC_GTS3 312 /* Incandescent #906 Bulb connected to 20V, commonly used for flashers */
 #define CORE_MODOUT_BULB_906_32V_DC_S11  313 /* Incandescent #906 Bulb connected to 32V, used for flashers on S11 with output strobing */
