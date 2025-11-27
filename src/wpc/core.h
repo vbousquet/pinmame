@@ -667,7 +667,6 @@ typedef struct {
 extern void core_dmd_pwm_init(core_tDMDPWMState* dmd_state, const int width, const int height, const int filter, const int raw_combiner);
 extern void core_dmd_pwm_exit(core_tDMDPWMState* dmd_state);
 extern void core_dmd_submit_frame(core_tDMDPWMState* dmd_state, const UINT8* frame, const int ntimes);
-extern void core_dmd_update_pwm(core_tDMDPWMState* dmd_state);
 extern void core_dmd_video_update(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const struct core_dispLayout *layout, core_tDMDPWMState* dmd_state);
 
 extern void core_sound_throttle_adj(int sIn, int *sOut, int buffersize, double samplerate);

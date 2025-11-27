@@ -252,8 +252,9 @@ static const unsigned char core_palette[COL_COUNT+48+48+48][3] = {
 };
 #define DMD_PAL(x)  ((unsigned int)sizeof(core_palette)/3u - (48u+48u+48u) + (unsigned int)(x) * 47u / 255u)
 #define LAMP_PAL(x) ((unsigned int)sizeof(core_palette)/3u - (48u+48u+48u) + (unsigned int)(x) * 47u / 255u) // (ab)use DMD shades
-static UINT32 TRAFO_AA(const UINT32 x)
+static UINT32 TRAFO_AA(const float px)
 {
+   UINT32 x = (UINT32)px;
 	return (x == 0 ? 0 : (x*(47-12)/255 + 12)); // off stays counted as off, otherwise trafo from 0..255 -> 12..47 to map the DMD luminance into the DMD AA shade world (as DMD AA also maps 0..perc0)
 }
 #define DMD_AA_PAL(x,m,d) ((unsigned int)sizeof(core_palette)/3u - (48u+48u) + (unsigned int)(x) * (m) / (d))
@@ -3114,44 +3115,62 @@ void core_dmd_pwm_exit(core_tDMDPWMState* dmd_state) {
   dmd_state->luminanceFrame = NULL;
 }
 
-// TODO for the time being, DMDs are always updated from core/updateDisplay, running at a fixed 60Hz. This may lead to stutters
-// as it is not aligned with real display refresh rate. We should update DMD on request but this needs to make these functions
-// thread safe. To avoid synchronization, a simple loop model with consumer accesing data before barrier, and provider pushing
-// data after the barrier should be enough.
 void core_dmd_submit_frame(core_tDMDPWMState* dmd_state, const UINT8* frame, const int ntimes) {
   for (int i = 0; i < ntimes; i++) {
     memcpy(dmd_state->rawFrames + dmd_state->nextFrame * dmd_state->rawFrameSize, frame, dmd_state->rawFrameSize);
+    // Update circular buffer position after writing the frame to allow concurrent PWM update
+    // (if the compiler/CPU reorder this instruction we may have visual glitches)
     dmd_state->nextFrame = (dmd_state->nextFrame + 1) % dmd_state->nFrames;
     dmd_state->frame_index++;
   }
 }
 
-void core_dmd_update_pwm(core_tDMDPWMState* dmd_state) {
+static float sRGB(const float f) { return (f <= 0.0031308f) ? (12.92f * f) : (1.055f * powf(f, (float)(1.0 / 2.4)) - 0.055f); }
+
+static float InvsRGB(const float x) { return (x <= 0.04045f) ? (x * (float)(1.0 / 12.92)) : (powf(x * (float)(1.0 / 1.055) + (float)(0.055 / 1.055), 2.4f)); }
+
+// PWM update must be done at the render frequency, therefore this function may be called concurrently from the 
+// frame submission by the emulated hardware. To avoid synchronization, a simple circular buffer with consumer
+// accesing data before barrier, and provider pushing data after the barrier is used and should be enough (we do
+// not use synchronization primitives, so this can fail if instructions are reordered).
+static void core_dmd_update_pwm(core_tDMDPWMState* dmd_state, UINT32* shadedFrame, UINT8* luminanceFrame) {
   // Apply low pass filter over stored frames then scale down to final shades
-  memset(dmd_state->shadedFrame, 0, dmd_state->width * dmd_state->height * sizeof(UINT32));
+  int framePos = dmd_state->nextFrame; // Circular buffer position, note that this may be changed concurrently from core_dmd_submit_frame
+  memset(shadedFrame, 0, dmd_state->frameSize * sizeof(UINT32));
   for (int ii = 0; ii < dmd_state->fir_size; ii++) {
+	 framePos--;
+	 if (framePos < 0)
+      framePos = dmd_state->nFrames - 1;
+    const UINT8* frameData = dmd_state->rawFrames + framePos * dmd_state->rawFrameSize;
     const UINT32 frame_weight = dmd_state->fir_weights[ii];
-    UINT32* line = dmd_state->shadedFrame;
-    const UINT8* frameData = dmd_state->rawFrames + ((dmd_state->nextFrame + (dmd_state->nFrames - 1) + (dmd_state->nFrames - ii)) % dmd_state->nFrames) * dmd_state->rawFrameSize;
-    for (int jj = 0; jj < dmd_state->rawFrameSize; jj++) {
-      UINT8 data = *frameData++;
-      if (dmd_state->revByte) {
+    UINT32* line = shadedFrame;
+    if (dmd_state->revByte) {
+      for (int jj = 0; jj < dmd_state->rawFrameSize; jj++) {
+        UINT8 data = *frameData++;
         for (int kk = 0; kk < 8; kk++, data >>= 1, line++)
           if (data & 0x01) (*line) += frame_weight;
-      } else {
+      }
+    } else {
+      for (int jj = 0; jj < dmd_state->rawFrameSize; jj++) {
+        UINT8 data = *frameData++;
         for (int kk = 0; kk < 8; kk++, data <<= 1, line++)
           if (data & 0x80) (*line) += frame_weight;
       }
     }
   }
-  const UINT32* line = dmd_state->shadedFrame;
-  for (int ii = 0; ii < dmd_state->height * dmd_state->width; ii++) {
-    const unsigned int data = (unsigned int) (*line++); // unsigned int precision is needed here
-    dmd_state->luminanceFrame[ii] = (UINT8)(data / dmd_state->fir_sum);
+  const UINT32* line = shadedFrame;
+  for (int ii = 0; ii < dmd_state->frameSize; ii++) {
+	 const float luminance = (float)(*line++) / (255.f * (float)dmd_state->fir_sum); // Linear luminance
+    const float sLuminance = sRGB(luminance); // Gamma cmpressed
+    luminanceFrame[ii] = (UINT8)(255.f * sLuminance);
+    //const unsigned int data = (unsigned int) (*line++); // unsigned int precision is needed here
+    //luminanceFrame[ii] = (UINT8)(data / dmd_state->fir_sum);
   }
+}
 
+static void core_dmd_update_identify(core_tDMDPWMState* dmd_state)
+{
   // Compute combined bitplane frames as they used to be for backward compatibility with colorization plugins
-  #if defined(VPINMAME) || defined(LIBPINMAME)
   switch (dmd_state->raw_combiner) {
   case CORE_DMD_PWM_COMBINER_GTS3_4C_A: // Reproduce previous (somewhat hacky) frame combiner used by GTS3 driver
   case CORE_DMD_PWM_COMBINER_GTS3_4C_B:
@@ -3270,26 +3289,6 @@ void core_dmd_update_pwm(core_tDMDPWMState* dmd_state) {
   default:
     assert(0); // Unsupported combiner
   }
-  #endif
-
-  // For GTS3, WPC and Alvin G. 2 also store raw single bitplane frame for backward compatibility with colorization plugins
-  // TODO move these data to dmd_state struct (for cleanup and to fix multiple DMD support for GTS3 Strikes N' Spares)
-  #if defined(VPINMAME) || defined(LIBPINMAME)
-  if (core_gameData->gen & (GEN_ALLWPC | GEN_GTS3 | GEN_ALVG_DMD2)) {
-    raw_dmd_frame_count = dmd_state->nFrames > CORE_MAX_RAW_DMD_FRAMES ? CORE_MAX_RAW_DMD_FRAMES : dmd_state->nFrames;
-    UINT8* rawData = &raw_dmd_frames[0];
-    for (int frame = 0; frame < (int)raw_dmd_frame_count; frame++) {
-      const UINT8* frameData = dmd_state->rawFrames + ((dmd_state->nextFrame + (dmd_state->nFrames - 1) + (dmd_state->nFrames - frame)) % dmd_state->nFrames) * dmd_state->rawFrameSize;
-      for (int jj = 0; jj < dmd_state->rawFrameSize; jj++) {
-        *rawData = dmd_state->revByte ? (*frameData++) : core_revbyte(*frameData++);
-        rawData++;
-      }
-    }
-  }
-  else {
-    raw_dmd_frame_count = 0;
-  }
-  #endif
 }
 
 // Render to internal display, using provided luminance, if there is a visible display (PinMAME always, and VPinMAME when its window is shown)
@@ -3301,7 +3300,7 @@ void core_dmd_render_internal(struct mame_bitmap *bitmap, const int x, const int
   for (int ii = 0; ii < height; ii++) {
     BMTYPE *line = (*lines) + (x * locals.displaySize);
     for (int jj = 0; jj < width; jj++) {
-      *line = DMD_PAL(dmdDotLum[DMD_OFS(ii, jj)]);
+      *line = DMD_PAL(255.f * InvsRGB(dmdDotLum[DMD_OFS(ii, jj)] / 255.f));
       line += locals.displaySize;
     }
     lines += locals.displaySize;
@@ -3323,19 +3322,19 @@ void core_dmd_render_internal(struct mame_bitmap *bitmap, const int x, const int
           // x 0 x
           // 0 0 0
           // x 0 x
-          const UINT32 lum = TRAFO_AA(dmdDotLum[DMD_OFS(pi, pj)]) + TRAFO_AA(dmdDotLum[DMD_OFS(pi+1, pj)]) + TRAFO_AA(dmdDotLum[DMD_OFS(pi, pj+1)]) + TRAFO_AA(dmdDotLum[DMD_OFS(pi+1, pj+1)]);
+          const UINT32 lum = TRAFO_AA(255.f * InvsRGB(dmdDotLum[DMD_OFS(pi, pj)] / 255.f)) + TRAFO_AA(255.f * InvsRGB(dmdDotLum[DMD_OFS(pi+1, pj)] / 255.f)) + TRAFO_AA(255.f * InvsRGB(dmdDotLum[DMD_OFS(pi, pj+1)] / 255.f)) + TRAFO_AA(255.f * InvsRGB(dmdDotLum[DMD_OFS(pi+1, pj+1)] / 255.f));
           *line = lum == 0 ? 0 : DMD_AA_PAL(lum * pmoptions.dmd_antialias,1,16u*100 /3u); // /3 = heuristic to kinda match old AA behavior
         } else if (ii & 1) { // Vertical side point
           // 0 x 0
           // 0 0 0
           // 0 x 0
-          const UINT32 lum = TRAFO_AA(dmdDotLum[DMD_OFS(pi, pj+1)]) + TRAFO_AA(dmdDotLum[DMD_OFS(pi+1, pj+1)]);
+          const UINT32 lum = TRAFO_AA(255.f * InvsRGB(dmdDotLum[DMD_OFS(pi, pj+1)] / 255.f)) + TRAFO_AA(255.f * InvsRGB(dmdDotLum[DMD_OFS(pi+1, pj+1)] / 255.f));
           *line = lum == 0 ? 0 : DMD_AA_PAL(lum * pmoptions.dmd_antialias,2,16u*100 /3u); // /3 = heuristic to kinda match old AA behavior
         } else if (jj & 1) { // Horizontal side point
           // 0 0 0
           // x 0 x
           // 0 0 0
-          const UINT32 lum = TRAFO_AA(dmdDotLum[DMD_OFS(pi+1, pj)]) + TRAFO_AA(dmdDotLum[DMD_OFS(pi+1, pj+1)]);
+          const UINT32 lum = TRAFO_AA(255.f * InvsRGB(dmdDotLum[DMD_OFS(pi+1, pj)] / 255.f)) + TRAFO_AA(255.f * InvsRGB(dmdDotLum[DMD_OFS(pi+1, pj+1)] / 255.f));
           *line = lum == 0 ? 0 : DMD_AA_PAL(lum * pmoptions.dmd_antialias,2,16u*100 /3u); // /3 = heuristic to kinda match old AA behavior
         }
         line++;
@@ -3482,6 +3481,37 @@ void core_dmd_video_update(struct mame_bitmap *bitmap, const struct rectangle *c
   UINT8 *dmdDotLum;
 
   if (dmd_state) { // Full DMD state with luminance and bitplane state
+    // FIXME this should be called on renderer request, not on an arbitrary 60Hz that will cause bad animations
+    core_dmd_update_pwm(
+	   dmd_state,                // frames generated by the emulated hardware
+      dmd_state->shadedFrame,    // temp buffer (re)used for filtering
+	   dmd_state->luminanceFrame  // final data (sLum8: 8 bit gamma compressed luminance)
+	 );
+
+    #if defined(VPINMAME) || defined(LIBPINMAME)
+    // This is called at a fixed 60Hz update frequency for backward compatibility
+    core_dmd_update_identify(dmd_state);
+    #endif
+
+    // For GTS3, WPC and Alvin G. 2 also store raw single bitplane frame for backward compatibility with colorization plugins
+    // FIXME remove as these data doesn't seem to be used by any known colorizer (Serum does not, DMDExt does not, Lucky's one is closed source but is unlikely to use as DMDDExt does not)
+    #if defined(VPINMAME) || defined(LIBPINMAME)
+    if (core_gameData->gen & (GEN_ALLWPC | GEN_GTS3 | GEN_ALVG_DMD2)) {
+      raw_dmd_frame_count = dmd_state->nFrames > CORE_MAX_RAW_DMD_FRAMES ? CORE_MAX_RAW_DMD_FRAMES : dmd_state->nFrames;
+      UINT8* rawData = &raw_dmd_frames[0];
+      for (int frame = 0; frame < (int)raw_dmd_frame_count; frame++) {
+        const UINT8* frameData = dmd_state->rawFrames + ((dmd_state->nextFrame + (dmd_state->nFrames - 1) + (dmd_state->nFrames - frame)) % dmd_state->nFrames) * dmd_state->rawFrameSize;
+        for (int jj = 0; jj < dmd_state->rawFrameSize; jj++) {
+          *rawData = dmd_state->revByte ? (*frameData++) : core_revbyte(*frameData++);
+          rawData++;
+        }
+      }
+    }
+    else {
+      raw_dmd_frame_count = 0;
+    }
+    #endif
+
     dmdDotRaw = dmd_state->bitplaneFrame;
     dmdDotLum = dmd_state->luminanceFrame;
   }
@@ -3489,8 +3519,10 @@ void core_dmd_video_update(struct mame_bitmap *bitmap, const struct rectangle *c
     dmdDotRaw = &coreGlobals.dmdDotRaw[0];
     dmdDotLum = &coreGlobals.dmdDotLum[0];
     if ((core_gameData->gen & GEN_SAM) == 0) {
-      static const UINT8 lum4[] = { 0, 85, 170, 255 };
-      static const UINT8 lum16[] = { 0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255 };
+      //static const UINT8 lum4[] = { 0, 85, 170, 255 }; // Linear luminance
+      //static const UINT8 lum16[] = { 0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255 };
+      static const UINT8 lum4[] = { 0, 156, 213, 255 }; // Gamma luminance
+      static const UINT8 lum16[] = { 0, 73, 102, 124, 141, 156, 170, 182, 193, 203, 213, 222, 231, 239, 247, 255 };
       const UINT8* const lum = (core_gameData->gen & GEN_SPA) != 0 ? lum16 : lum4;
       for (int ii = 0; ii < layout->length * layout->start; ii++)
         dmdDotLum[ii] = lum[dmdDotRaw[ii]];
