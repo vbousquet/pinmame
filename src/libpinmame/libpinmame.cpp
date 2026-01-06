@@ -2245,7 +2245,7 @@ static void SetupMsgApi()
          msgLocals.deviceDef.deviceDefs[36 + i].groupId = 0x0001;
          msgLocals.deviceDef.deviceDefs[36 + i].deviceId = 37 + (i & 3);
          msgLocals.deviceMap[36 + i].type = isPhysSol ? LPM_DM_PHYSOUT : LPM_DM_CORE_SOL1;
-         msgLocals.deviceMap[36 + i].srcId = isPhysSol ? (CORE_MODOUT_SOL0 + 28 + (i & 3)) : (1 << (28 + (i & 3)));
+         msgLocals.deviceMap[36 + i].srcId = isPhysSol ? (CORE_MODOUT_SOL0 + 36 + (i & 3)) : (1 << (36 + (i & 3)));
       }
    }
    // 37..44, S11, SAM, SPA: extension board with 8 outputs (stored in 0xFF00 of solenoids2)
