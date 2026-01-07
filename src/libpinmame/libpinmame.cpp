@@ -2154,13 +2154,13 @@ static void SetupMsgApi()
    // 29..32, WPC: fake GameOn solenoids for fast flip (not modulated, stored in 0x0F00 of solenoids2, why 4 bits (actually only 3) ?)
    if (core_gameData->gen & GEN_ALLWPC)
    {
-      for (int i = 0; i < 4; i++)
+      for (int i = 28; i < 32; i++)
       {
          msgLocals.deviceDef.deviceDefs[i].name = fmtString("WPC Fake GameOn #%d", i + 1);
          msgLocals.deviceDef.deviceDefs[i].groupId = 0x0010;
          msgLocals.deviceDef.deviceDefs[i].deviceId = i + 1;
          msgLocals.deviceMap[i].type = LPM_DM_CORE_SOL2;
-         msgLocals.deviceMap[i].srcId = 1 << (i + 8);
+         msgLocals.deviceMap[i].srcId = 1 << (i - 28 + 8);
       }
    }
    // 29..32, solenoid outputs from driver board
@@ -2169,11 +2169,11 @@ static void SetupMsgApi()
    {
       for (int i = 28; i < 32; i++)
       {
-         msgLocals.deviceDef.deviceDefs[28 + i].name = fmtString("Sol #%02d", i + 1);
-         msgLocals.deviceDef.deviceDefs[28 + i].groupId = 0x0001;
-         msgLocals.deviceDef.deviceDefs[28 + i].deviceId = i + 1;
-         msgLocals.deviceMap[28 + i].type = isPhysSol ? LPM_DM_PHYSOUT : LPM_DM_CORE_SOL1;
-         msgLocals.deviceMap[28 + i].srcId = isPhysSol ? (CORE_MODOUT_SOL0 + i) : (1 << i);
+         msgLocals.deviceDef.deviceDefs[i].name = fmtString("Sol #%02d", i + 1);
+         msgLocals.deviceDef.deviceDefs[i].groupId = 0x0001;
+         msgLocals.deviceDef.deviceDefs[i].deviceId = i + 1;
+         msgLocals.deviceMap[i].type = isPhysSol ? LPM_DM_PHYSOUT : LPM_DM_CORE_SOL1;
+         msgLocals.deviceMap[i].srcId = isPhysSol ? (CORE_MODOUT_SOL0 + i) : (1 << i);
       }
    }
    // 33, SAM: fake GameOn solenoid for fast flip
