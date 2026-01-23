@@ -31,7 +31,6 @@ int g_fHandleMechanics = 0xFF;
 int g_fDumpFrames = 0;
 int g_fPause = 0;
 PINMAME_DMD_MODE g_fDmdMode = PINMAME_DMD_MODE_BRIGHTNESS;
-PINMAME_SOUND_MODE g_fSoundMode = PINMAME_SOUND_MODE_DEFAULT;
 
 char g_szGameName[256] = {}; //!! not set yet
 }
@@ -235,6 +234,8 @@ static struct
       const core_tLCDLayout* layout;
    } displays[8];
    unsigned int onDisplaySrcChangedId, getDisplaySrcId;
+
+   unsigned int onSoundCommandId;
 } msgLocals = { 0 };
 
 
@@ -450,7 +451,7 @@ extern "C" int osd_start_audio_stream(const int stereo)
 
 extern "C" int osd_update_audio_stream(INT16* p_buffer)
 {
-	if(!_p_Config->cb_OnAudioUpdated || g_fSoundMode != PINMAME_SOUND_MODE_DEFAULT)
+	if(!_p_Config->cb_OnAudioUpdated)
 		return 0;
 
 	const int samplesThisFrame = mixer_samples_this_frame();
@@ -552,12 +553,26 @@ extern "C" void libpinmame_update_display(const struct core_dispLayout* layout, 
  * libpinmame_snd_cmd_log
  ******************************************************/
 
+static void OnSoundCommand(void* userData)
+{
+	CtlOnSoundCommandMsg* msg = static_cast<CtlOnSoundCommandMsg*>(userData);
+	if (msgLocals.registered)
+		msgLocals.msgApi->BroadcastMsg(msgLocals.endpointId, msgLocals.onSoundCommandId, msg);
+	delete msg;
+}
+
 extern "C" void libpinmame_snd_cmd_log(int boardNo, int cmd)
 {
-	if (!_p_Config->cb_OnSoundCommand)
-		return;
+	if (_p_Config->cb_OnSoundCommand)
+		(*(_p_Config->cb_OnSoundCommand))(boardNo, cmd, _p_userData);
 
-	(*(_p_Config->cb_OnSoundCommand))(boardNo, cmd, _p_userData);
+	if (msgLocals.msgApi != NULL && msgLocals.registered)
+	{
+		CtlOnSoundCommandMsg* msg = new CtlOnSoundCommandMsg();
+		msg->boardNo = static_cast<unsigned int>(boardNo);
+		msg->cmd = static_cast<unsigned int>(cmd);
+		msgLocals.msgApi->RunOnMainThread(msgLocals.endpointId, 0, OnSoundCommand, msg);
+	}
 }
 
 /******************************************************
@@ -986,24 +1001,6 @@ PINMAMEAPI void PinmameSetDmdMode(const PINMAME_DMD_MODE dmdMode)
 PINMAMEAPI PINMAME_DMD_MODE PinmameGetDmdMode()
 {
 	return g_fDmdMode;
-}
-
-/******************************************************
- * PinmameGetSoundMode
- ******************************************************/
-
-PINMAMEAPI PINMAME_SOUND_MODE PinmameGetSoundMode()
-{
-	return g_fSoundMode;
-}
-
-/******************************************************
- * PinmameSetSoundMode
- ******************************************************/
-
-PINMAMEAPI void PinmameSetSoundMode(const PINMAME_SOUND_MODE soundMode)
-{
-	g_fSoundMode = soundMode;
 }
 
 /******************************************************
@@ -1879,6 +1876,7 @@ static void SetupMsgApi()
 
    msgLocals.onGameStartId = msgLocals.msgApi->GetMsgID(CTLPI_NAMESPACE, CTLPI_EVT_ON_GAME_START);
    msgLocals.onGameEndId = msgLocals.msgApi->GetMsgID(CTLPI_NAMESPACE, CTLPI_EVT_ON_GAME_END);
+   msgLocals.onSoundCommandId = msgLocals.msgApi->GetMsgID(CTLPI_NAMESPACE, CTLPI_EVT_ON_SOUND_COMMAND);
 
    // -- Prepare data structures for displays
    msgLocals.nDisplays = 0;
@@ -2408,7 +2406,8 @@ static void ReleaseMsgApi()
 
    msgLocals.msgApi->ReleaseMsgID(msgLocals.onGameStartId);
    msgLocals.msgApi->ReleaseMsgID(msgLocals.onGameEndId);
-   
+   msgLocals.msgApi->ReleaseMsgID(msgLocals.onSoundCommandId);
+
    if (msgLocals.nDisplays > 0)
    {
       msgLocals.msgApi->UnsubscribeMsg(msgLocals.getDisplaySrcId, OnGetDisplaySrc);
@@ -2465,7 +2464,7 @@ static void ReleaseMsgApi()
 static void OnGameStart(void*)
 {
    SetupMsgApi();
-   CtlOnGameStartMsg msg = { Machine->gamedrv->name };
+   CtlOnGameStartMsg msg = { Machine->gamedrv->name, core_gameData->gen };
    if (msgLocals.registered)
       msgLocals.msgApi->BroadcastMsg(msgLocals.endpointId, msgLocals.onGameStartId, reinterpret_cast<void*>(&msg));
 }
