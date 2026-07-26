@@ -2293,7 +2293,7 @@ static void SetupMsgApi()
                   label = fmtString("Output #%02d (WPC95 J120)", i);
                else
                   label = fmtString("Output #%02d (Fliptronic)", i);
-               addDevice(label, PMPI_GROUP_SOLENOID | 0x0002, i, LPM_DM_CORE_SOL2, mask, byteOrFloat);
+               addPhysSol(label, PMPI_GROUP_SOLENOID | 0x0002, i, LPM_DM_CORE_SOL2, mask, i - 1);
             }
          }
       }
