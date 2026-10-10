@@ -487,7 +487,17 @@ typedef struct {
          double lastFlipTimestamp;
          float switchDownLatency;
          float onValue;                   /* value while on: 1, or a drive strength the driver sets (Capcom flippers) */
-      } sol; // Physical model of a solenoid
+      } sol; // Simplified model of a solenoid coil (fast on, slow off to swallow PWM)
+      struct
+      {
+         double prevIntegrationTimestamp; /* timestamp up to which the coil current has been integrated */
+         float i;                         /* coil current relative to its DC steady state maximum (U/R for DC, Up/R for AC) */
+         float invTau;                    /* coil electrical rate R/L (Hz) */
+         float offSteady;                 /* relative coil current target when released (-freewheel diode drop / U) */
+         int isAC;                        /* 0: DC drive, 1: 60Hz AC drive (phase from lastACPositiveZeroCrossTimeStamp) */
+         float amp;                       /* AC: steady state current amplitude relative to Up/R, that is R/Z (1 for DC) */
+         float phase;                     /* AC: steady state current lag relative to the AC line, atan(2.pi.60Hz.L/R) */
+      } coil; // Physical model of a switched solenoid coil
    } state;
    double flipTimeStamps[FLIP_BUFFER_SIZE];
    unsigned int flipBufferPos;            /* Writer: free running flip count; parity is the binary state, % FLIP_BUFFER_SIZE the buffer index */
@@ -622,6 +632,7 @@ extern void core_getAllPhysicSols(float* const state);
 /*-- AC sync and PWM integration --*/
 extern void core_update_pwm_outputs(const int startIndex, const int count);
 extern void core_update_pwm_output_sol_2_state(const double now, const int index, const int isFlip, const int state);
+extern void core_update_pwm_output_sol(const double now, const int index, const int isFlip, const int state);
 INLINE void core_update_pwm_gis(void) { if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_GI)) core_update_pwm_outputs(CORE_MODOUT_GI0, coreGlobals.nGI); }
 INLINE void core_update_pwm_solenoids(void) { if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL)) core_update_pwm_outputs(CORE_MODOUT_SOL0, coreGlobals.nSolenoids); }
 INLINE void core_update_pwm_segments(void) { if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_ALPHASEGS)) core_update_pwm_outputs(CORE_MODOUT_SEG0, coreGlobals.nAlphaSegs); }
@@ -630,6 +641,7 @@ extern void core_set_pwm_output_type(int startIndex, int count, int type);
 extern void core_set_pwm_output_types(int startIndex, int count, int* outputTypes);
 extern void core_set_pwm_output_bulb(int startIndex, int count, int bulb, float U, int isAC, float serial_R, float relative_brightness);
 extern void core_set_pwm_output_led_vfd(int startIndex, int count, int isVFD, float relative_brightness); // Relative brightness should be (period length / pulse length)
+extern void core_set_pwm_output_sol(int startIndex, int count, float U, float R, float L, int isAC); // Coil driven to voltage U (V, RMS for AC) through a switch, coil resistance R (Ohms) and inductance L (H); isAC 0: DC drive, 1: 60Hz AC drive
 extern int core_get_pwm_output_type(int index);
 extern void core_write_pwm_output(int startIndex, int count, UINT8 bitStates); // Write binary state of count outputs, taking care of PWM integration based on physical model of connected device
 extern void core_write_pwm_output_8b(int startIndex, UINT8 bitStates);

@@ -116,9 +116,11 @@
 #define CAPCOM_LEGACY_FLIPPER_SWAP 0
 #endif
 
-// Flipper strength, the duty of the power stroke, reported as the flipper outputs' value while on. Newer firmware (Kingpin,
-// Flipper Football) keeps the strength adjustment as a RAM byte, n of 32 slots; older firmware (Pinball Magic, Airborne,
-// Breakshot, Big Bang Bar, Pool Player) writes the adjustment (2..16) as a 16 slot pattern into the coil's RAM descriptor, n bits set
+// Flipper strength, the duty of the power stroke. With the coil model the flipper outputs report the integrated
+// coil current which PWM sets directly; with the 2 state model (fallback when physical outputs are disabled), they
+// report the strength read in RAM as their value while on. Newer firmware (Kingpin, Flipper Football) keeps the
+// strength adjustment as a RAM byte, n of 32 slots; older firmware (Pinball Magic, Airborne, Breakshot, Big Bang
+// Bar, Pool Player) writes the adjustment (2..16) as a 16 slot pattern into the coil's RAM descriptor, n bits set
 #define CC_FLIP_BYTE32    1
 #define CC_FLIP_PATTERN16 2
 
@@ -164,6 +166,13 @@ static NVRAM_HANDLER(cc);
 static void Skip_Error_Msg(void);
 static void cc_dmd_rasterizer_sync(int param);
 
+/* set the value-while-on of an output driven by the 2 state solenoid model (the coil model integrates the coil current instead) */
+static void cc_set_sol_onvalue(int sol, float value) {
+  core_tPhysicOutput* const output = &coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + sol - 1];
+  if (output->type == CORE_MODOUT_SOL_2_STATE || output->type == CORE_MODOUT_LEGACY_SOL_2_STATE)
+    output->state.sol.onValue = value;
+}
+
 static INTERRUPT_GEN(cc_vblank) {
   /*-- update leds (they are PWM faded, so uses physic output) --*/
   coreGlobals.diagnosticLed = (coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + 8 * 8 + (core_gameData->hw.lampCol - 1) * 8    ].value >= 0.5f ? 1 : 0)
@@ -189,10 +198,10 @@ static INTERRUPT_GEN(cc_vblank) {
       }
       if (strength <= 0.f) // not set up yet, or caught while the game rewrites it: keep the last value
         continue;
-      coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + 9 - 1 + i].state.sol.onValue = strength;
+      cc_set_sol_onvalue(9 + i, strength);
       if (locals.flipMirror[i]) {
-        coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + locals.flipMirror[i] - 1].state.sol.onValue = strength; // power
-        coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + locals.flipMirror[i]    ].state.sol.onValue = strength; // hold
+        cc_set_sol_onvalue(locals.flipMirror[i],     strength); // power
+        cc_set_sol_onvalue(locals.flipMirror[i] + 1, strength); // hold
       }
     }
 
@@ -801,12 +810,18 @@ static MACHINE_INIT(cc) {
   core_set_pwm_output_type(CORE_MODOUT_LAMP0 + coreGlobals.nLamps - 7, 1, CORE_MODOUT_LED); // Sound Board Diagnostic LED
   coreGlobals.nSolenoids = CORE_FIRSTCUSTSOL - 1 + core_gameData->hw.custSol;
   coreGlobals.hasModulatedFlippers = TRUE;
-  core_set_pwm_output_type(CORE_MODOUT_SOL0, coreGlobals.nSolenoids, CORE_MODOUT_SOL_2_STATE);
+  // Capcom solenoids are single winding coils switched to the 50V rail through a MOSFET low side driver
+  // (STP20N10L) with a freewheel diode. The game PWMs them to regulate their average current (for the flippers,
+  // the power stroke duty is the strength adjustment, see US5655770), which the coil model integrates. Coil
+  // characteristics from mayapinball.com's pinball coil database: the general outputs use 23-800 coils (~3.8
+  // Ohms, ~16mH measured with the plunger seated), the flippers (solenoids 9..12 and their mirrors below) the
+  // longer 22-1100 coil CL00111 (~4.4 Ohms, ~24mH).
+  core_set_pwm_output_sol(CORE_MODOUT_SOL0, coreGlobals.nSolenoids, 50.f, 3.8f, 0.016f, 0);
+  core_set_pwm_output_sol(CORE_MODOUT_SOL0 + 9 - 1, 4, 50.f, 4.4f, 0.024f, 0);
   core_set_pwm_output_type(CORE_MODOUT_SOL0 + CORE_FIRSTCUSTSOL - 1, 1, CORE_MODOUT_SOL_CUSTOM); // GameOn solenoid for Fast Flips
-  // Flipper outputs mirrored from solenoids 9..12 (see io_w): not fast on, which would write slot & 31 of solenoids2, the
-  // lower flipper bits for 33..36; cc_vblank sets the flipper bits
-  core_set_pwm_output_type(CORE_MODOUT_SOL0 + sURFlipPow - 1, 4, CORE_MODOUT_LEGACY_SOL_2_STATE);
-  core_set_pwm_output_type(CORE_MODOUT_SOL0 + sLRFlipPow - 1, 4, CORE_MODOUT_LEGACY_SOL_2_STATE);
+  // Flipper outputs mirrored from solenoids 9..12 (see io_w); cc_vblank sets the flipper bits
+  core_set_pwm_output_sol(CORE_MODOUT_SOL0 + sURFlipPow - 1, 4, 50.f, 4.4f, 0.024f, 0);
+  core_set_pwm_output_sol(CORE_MODOUT_SOL0 + sLRFlipPow - 1, 4, 50.f, 4.4f, 0.024f, 0);
   // Game specific hardware
   const struct GameDriver* rootDrv = Machine->gamedrv;
   while (rootDrv->clone_of && (rootDrv->clone_of->flags & NOT_A_DRIVER) == 0)
@@ -1088,8 +1103,8 @@ MACHINE_DRIVER_END
 // The rasterizer converts the 2 bit values into 4 PWM frames (leading to 4 shades) but the CPU may also quickly
 // change pages, leading to longer PWM patterns (multiple groups of 4 frames) leading to more shades.
 // The (measured) timings are the followings:
-// - 128x32: 1.965ms per frame, 61.417µs per line, dots are 250/250/250/208ns (per group of 4)
-// - 256x64: 3.931ms per frame, 61.417µs per line, dots are 250/250/250/208ns (per group of 4)
+// - 128x32: 1.965ms per frame, 61.417ï¿½s per line, dots are 250/250/250/208ns (per group of 4)
+// - 256x64: 3.931ms per frame, 61.417ï¿½s per line, dots are 250/250/250/208ns (per group of 4)
 // Therefore we setup a timer with the right timing which decodes the 2 bit data into frames and submit them for PWM integration
 // TODO RAM is read once per group of 4 frames (7.9ms for 128x32, 15.7ms for 256x64), while the U16 reads it for each frame, so the
 // quick page toggles of the CPU (2ms) are only partly seen. Running the timer once per frame and rasterizing the next frame of the

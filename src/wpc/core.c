@@ -1899,8 +1899,9 @@ void core_updateSw(int flipEn) {
         #ifdef LIBPINMAME
         OnSolenoid(ii, v);
         #else
-        // On above half; 2 state solenoids above 0, as their onValue may be below 1 (Capcom flipper strength)
-        const UINT8 onLevel = coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + ii - 1].integrator == &core_update_pwm_output_sol_2_state ? 0 : 128;
+        // On above half; solenoid models above 0, as their drive may be well below full power (PWM hold, Capcom flipper strength,...)
+        const UINT8 onLevel = (coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + ii - 1].integrator == &core_update_pwm_output_sol_2_state
+                            || coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + ii - 1].integrator == &core_update_pwm_output_sol) ? 0 : 128;
         if ((v > onLevel) != (locals.lastPhysicsOutput[CORE_MODOUT_SOL0 + ii - 1] > onLevel)) {
           OnSolenoid(ii, v);
           /*-- log solenoid number on the display (except flippers) --*/
@@ -3194,6 +3195,54 @@ void core_update_pwm_output_sol_2_state(const double now, const int index, const
   }
 }
 
+// Solenoid (coil) model: the binary output drives a switch (usually a MOSFET or a TRIAC) connecting the coil
+// to a voltage source u(t): a DC rail of U volts for DC coils, or the 60Hz AC line (U RMS volts, phase synced
+// on coreGlobals.lastACPositiveZeroCrossTimeStamp like the bulb AC models) for AC coils. When driven, the
+// coil current evolves following the RL circuit equation di/dt = (u(t) - R.i)/L, with the electrical time
+// constant tau = L/R (a few milliseconds for pinball coils):
+// - DC: the current ramps up toward its steady state maximum Imax = U/R,
+// - AC: the current converges to the steady state sine i_ss(t) = (Up/Z).sin(w.t - atan(wL/R)) of amplitude
+//   Up/Z (Z the coil impedance at 60Hz, w the line angular frequency), plus a decaying inrush transient.
+// When released, the current freewheels through the coil's diode and decays toward -Vf/R, that is to 0 as
+// the diode stops conducting (Vf is the diode forward voltage drop).
+// The reported value is the relative ampere-turns: for DC, the coil current relative to Imax; for AC, the
+// instantaneous current follows the line so the reported value is the peak equivalent of the RMS current
+// relative to its steady state (over a cycle, mean(i^2) = i_ss^2/2 + i_tr^2, i_tr being the decaying
+// transient): it is 1 at steady state and rises above it during inrush, without flickering at the zero
+// crossings. It is the quantity a PWM drive regulates (the duty sets the average current, see e.g. Capcom's
+// patent US5655770). Note that the magnetic pull on the plunger is proportional to its square (F = i^2 . dL/dx / 2).
+// Since the model integrates exactly over each constant drive interval, there is no need to bound the
+// integration steps like for bulbs (isFlip is unused).
+void core_update_pwm_output_sol(const double now, const int index, const int isFlip, const int state)
+{
+  core_tPhysicOutput* const output = &coreGlobals.physicOutputState[index];
+  // Clamp elapsed time to >= 0 (see core_update_pwm_output_bulb)
+  const float dt = fmaxf(0.f, (float)(now - output->state.coil.prevIntegrationTimestamp));
+  float i;
+  if (state && output->state.coil.isAC) {
+    // AC drive: the current is the steady state sine i_ss(t) plus a decaying transient offset i_tr(t)
+    const float w = (float)(60.0 * 2.0 * PI);
+    const float w0 = w * (float)(output->state.coil.prevIntegrationTimestamp - coreGlobals.lastACPositiveZeroCrossTimeStamp);
+    const float w1 = w * (float)(now - coreGlobals.lastACPositiveZeroCrossTimeStamp);
+    const float i_tr = (output->state.coil.i - output->state.coil.amp * sinf(w0 - output->state.coil.phase)) * expf(-dt * output->state.coil.invTau);
+    i = output->state.coil.amp * sinf(w1 - output->state.coil.phase) + i_tr;
+    output->value = sqrtf(output->state.coil.amp * output->state.coil.amp + 2.f * i_tr * i_tr) / output->state.coil.amp;
+  }
+  else {
+    const float target = state ? 1.f : output->state.coil.offSteady;
+    i = target + (output->state.coil.i - target) * expf(-dt * output->state.coil.invTau);
+    if (i < 0.f)
+      i = 0.f; // the freewheel diode stops conducting once the current has fully decayed
+    output->value = i;
+  }
+  output->state.coil.i = i;
+  output->state.coil.prevIntegrationTimestamp = now;
+  #ifdef LOG_PWM_OUT
+  if (index == LOG_PWM_OUT)
+    printf("Sol #%d t=%8.5f i=%0.3f s=%s\n", index - CORE_MODOUT_SOL0 + 1, now, output->value, isFlip ? (state ? "x > -" : "- > x") : (state ? "    x" : "    -"));
+  #endif
+}
+
 INLINE float cube(const float x)
 {
   return x * x * x;
@@ -3623,6 +3672,26 @@ void core_set_pwm_output_led_vfd(int startIndex, int count, int isVFD, float rel
   }
 }
 
+void core_set_pwm_output_sol(int startIndex, int count, float U, float R, float L, int isAC)
+{
+  for (int i = startIndex; i < startIndex + count; i++) {
+    memset(&(coreGlobals.physicOutputState[i]), 0, sizeof(core_tPhysicOutput));
+    coreGlobals.physicOutputState[i].flipBufferPos = (coreGlobals.binaryOutputState[i >> 3] >> (i & 7)) & 1;
+    coreGlobals.physicOutputState[i].type = CORE_MODOUT_CUSTOM_INTEGRATOR;
+    coreGlobals.physicOutputState[i].state.coil.invTau = R / L;
+    coreGlobals.physicOutputState[i].state.coil.isAC = isAC;
+    if (isAC) {
+      const float wL = (float)(60.0 * 2.0 * PI) * L; // coil reactance at 60Hz
+      const float Z = sqrtf(R * R + wL * wL);        // coil impedance at 60Hz
+      coreGlobals.physicOutputState[i].state.coil.amp = R / Z;
+      coreGlobals.physicOutputState[i].state.coil.phase = atan2f(wL, R);
+    }
+    // ~1V drop of the coil freewheel diode relative to the drive amplitude (peak for AC)
+    coreGlobals.physicOutputState[i].state.coil.offSteady = -1.0f / (isAC ? 1.41421356f * U : U);
+    coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_sol;
+  }
+}
+
 void core_set_pwm_output_types(int startIndex, int count, int* outputTypes)
 {
    for (int i = 0; i < count; i++)
@@ -3742,8 +3811,8 @@ void core_update_pwm_outputs(const int startIndex, const int count)
          UINT32 sols = 0;
          for (int i = 0; i < 32; i++) {
             const core_tPhysicOutput* const output = &coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + i];
-            // 2 state solenoids are on at any value above 0: their onValue may be below 1
-            if (output->integrator == &core_update_pwm_output_sol_2_state ? output->value > 0.f : output->value >= 0.5f)
+            // solenoid models are on at any value above 0: their drive may be below half the maximum
+            if (output->integrator == &core_update_pwm_output_sol_2_state || output->integrator == &core_update_pwm_output_sol ? output->value > 0.f : output->value >= 0.5f)
                sols |= 1u << i;
          }
          coreGlobals.solenoids = sols;
